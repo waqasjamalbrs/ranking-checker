@@ -4,13 +4,13 @@ import pandas as pd
 import json
 import os
 import time
-import io  # Excel file memory mai banane ke liye zaroori hai
+import io
 
 # --- Page Config ---
 st.set_page_config(page_title="Serper Rank Tracker", page_icon="📈", layout="wide")
 
-st.title("📈 Bulk Google Rank Checker (Excel Output)")
-st.markdown("Check your website rankings accurately using **Serper.dev API** with specific city targeting.")
+st.title("📈 Google Rank Checker (Keyword, City, State)")
+st.markdown("Use the **Bulk Upload** feature for maximum accuracy.")
 
 # --- Helper Function: Load Locations ---
 @st.cache_data
@@ -19,134 +19,189 @@ def get_locations():
         with open('locations.json', 'r', encoding='utf-8') as f:
             return json.load(f)
     else:
-        st.warning("⚠️ 'locations.json' file nahi mili. Please ensure you uploaded it to GitHub.")
-        return ["New York, NY, United States", "London, United Kingdom"]
+        return []
 
 all_locations = get_locations()
 
-# --- Sidebar: Settings ---
-with st.sidebar:
-    st.header("⚙️ Settings")
-    api_key = st.text_input("Serper API Key", type="password", help="Serper.dev se API key lein")
+# --- REFINED MATCHING LOGIC (City + State) ---
+def find_precise_location(city, state, all_locs):
+    city = str(city).strip()
     
-    target_location = st.selectbox(
-        "📍 Select Location (City)",
-        options=all_locations,
-        index=0,
-        placeholder="Type city name...",
-        help="City ka naam likhen, list auto-filter ho jayegi."
-    )
+    # Step 1: Filter by City Name
+    # E.g., "Sarasota" matches "Sarasota, Florida, US"
+    candidates = [loc for loc in all_locs if loc.lower().startswith(city.lower())]
     
-    st.success(f"Selected: **{target_location}**")
-
-# --- Main Inputs ---
-col1, col2 = st.columns([1, 2])
-
-with col1:
-    website_url = st.text_input("🌐 Website URL", placeholder="example.com")
-    st.caption("Example: qualityrestorationservicesinc.com")
-
-with col2:
-    keywords_text = st.text_area("🔑 Keywords (Har line mai ek keyword)", height=150, placeholder="water damage restoration\nmold remediation\nkitchen remodeling")
-
-# --- Logic: Check Rankings ---
-if st.button("🚀 Check Rankings"):
-    if not api_key:
-        st.error("❌ Please enter Serper API Key.")
-    elif not website_url:
-        st.error("❌ Please enter Website URL.")
-    elif not keywords_text.strip():
-        st.error("❌ Please enter at least one keyword.")
-    else:
-        keywords_list = [k.strip() for k in keywords_text.split('\n') if k.strip()]
-        total_keywords = len(keywords_list)
-        results = []
+    # Step 2: If State is provided, filter by State
+    if state and pd.notna(state) and str(state).strip() != "":
+        state_str = str(state).strip().lower()
         
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        # Check if state string exists in the location
+        # Handles "FL" vs "Florida" by checking if "fl" is inside the full string
+        filtered_candidates = [c for c in candidates if state_str in c.lower()]
         
-        st.write("---")
+        if filtered_candidates:
+            return filtered_candidates[0]
         
-        for i, keyword in enumerate(keywords_list):
-            status_text.text(f"Checking {i+1}/{total_keywords}: '{keyword}'...")
+        # Agar exact state match na mile, to pehla city match return karo
+        if candidates:
+            return candidates[0]
             
-            payload = json.dumps({
-                "q": keyword,
-                "location": target_location,
-                "gl": "us",
-                "hl": "en",
-                "num": 100
-            })
-            
-            headers = {
-                'X-API-KEY': api_key,
-                'Content-Type': 'application/json'
-            }
-            
+    # Step 3: If no State provided, return best City match
+    if candidates:
+        return candidates[0]
+        
+    return None
+
+# --- API Logic ---
+def check_ranking(keyword, location, website_url, api_key):
+    payload = json.dumps({
+        "q": keyword,
+        "location": location,
+        "gl": "us",
+        "hl": "en",
+        "num": 100
+    })
+    headers = {
+        'X-API-KEY': api_key,
+        'Content-Type': 'application/json'
+    }
+    
+    try:
+        response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
+        if response.status_code == 200:
+            data = response.json()
             rank = "Not in Top 100"
             found_url = "-"
             
-            try:
-                response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
+            if 'organic' in data:
+                for item in data['organic']:
+                    # Domain Matching Logic
+                    clean_target = website_url.replace("https://", "").replace("http://", "").replace("www.", "").split('/')[0]
+                    if clean_target.lower() in item['link'].lower():
+                        rank = item['position']
+                        found_url = item['link']
+                        break
+            return rank, found_url
+        else:
+            return f"Error {response.status_code}", "-"
+    except Exception as e:
+        return "Error", str(e)
+
+# --- Sidebar ---
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    api_key = st.text_input("Serper API Key", type="password")
+    st.divider()
+    mode = st.radio("Select Mode:", ["Bulk Upload (Keyword, City, State)", "Single City Check"])
+
+# ==========================================
+# MODE 1: BULK UPLOAD (Keyword, City, State)
+# ==========================================
+if mode == "Bulk Upload (Keyword, City, State)":
+    st.subheader("📂 Bulk Check (Excel Upload)")
+    
+    st.info("""
+    **Excel File Columns must be exactly:**
+    1. **Keyword** (e.g., water damage)
+    2. **City** (e.g., Sarasota)
+    3. **State** (e.g., FL or Florida)
+    """)
+    
+    website_url = st.text_input("Website URL", placeholder="example.com")
+    uploaded_file = st.file_uploader("Upload Excel File (.xlsx)", type=['xlsx'])
+    
+    if uploaded_file and website_url and api_key:
+        df_upload = pd.read_excel(uploaded_file)
+        
+        # Rename columns to standardized format if they differ slightly
+        # This helps if user writes "Keywords" instead of "Keyword"
+        df_upload.columns = [c.strip().title() for c in df_upload.columns]
+        
+        required_cols = ['Keyword', 'City', 'State']
+        
+        # Validation
+        if not all(col in df_upload.columns for col in required_cols):
+            st.error(f"❌ Error: Excel columns must be named: {required_cols}")
+            st.write("Current columns found:", df_upload.columns.tolist())
+        else:
+            st.write(f"Loaded {len(df_upload)} rows.")
+            
+            if st.button("🚀 Start Bulk Processing"):
+                results = []
+                progress = st.progress(0)
+                status = st.empty()
+                total = len(df_upload)
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'organic' in data:
-                        for item in data['organic']:
-                            clean_target = website_url.replace("https://", "").replace("http://", "").replace("www.", "").split('/')[0]
-                            if clean_target.lower() in item['link'].lower():
-                                rank = item['position']
-                                found_url = item['link']
-                                break
-                else:
-                    rank = f"API Error: {response.status_code}"
+                for index, row in df_upload.iterrows():
+                    kw = row['Keyword']
+                    city = row['City']
+                    state = row['State']
+                    
+                    # Logic to find exact location string
+                    matched_location = find_precise_location(city, state, all_locations)
+                    
+                    if not matched_location:
+                        matched_location = f"{city}, {state}" # Fallback
+                        note = " (⚠️ Not in Database)"
+                    else:
+                        note = ""
+                    
+                    status.text(f"Processing {index+1}/{total}: '{kw}' in {city}...")
+                    
+                    # API Call
+                    rank, url = check_ranking(kw, matched_location, website_url, api_key)
+                    
+                    results.append({
+                        "Keyword": kw,
+                        "Input City": city,
+                        "Input State": state,
+                        "Used Location": matched_location + note,
+                        "Rank": rank,
+                        "Found URL": url
+                    })
+                    
+                    progress.progress((index + 1) / total)
+                    time.sleep(0.1) # Small delay for safety
+                
+                status.success("✅ Analysis Complete!")
+                df_results = pd.DataFrame(results)
+                st.dataframe(df_results, use_container_width=True)
+                
+                # Excel Download
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    df_results.to_excel(writer, index=False)
+                st.download_button("📥 Download Final Report", buffer.getvalue(), "Rankings_Report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-            except Exception as e:
-                rank = "Error"
-                found_url = str(e)
-            
-            results.append({
-                "Keyword": keyword,
-                "Location": target_location,
-                "Rank": rank,
-                "Found URL": found_url
-            })
-            
-            progress_bar.progress((i + 1) / total_keywords)
-            time.sleep(0.1)
+# ==========================================
+# MODE 2: SINGLE CITY CHECK
+# ==========================================
+elif mode == "Single City Check":
+    st.subheader("📍 Quick Single Check")
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        target_location = st.selectbox("Select Location", all_locations if all_locations else ["New York, NY, United States"])
+        website_url = st.text_input("Website URL", placeholder="example.com")
+    with col2:
+        keywords_text = st.text_area("Keywords (1 per line)", height=150)
 
-        status_text.success("✅ Analysis Complete!")
-        
-        # --- Display Results ---
-        df = pd.DataFrame(results)
-        
-        # Table Styling
-        def highlight_rank(val):
-            if isinstance(val, int):
-                if val <= 3: return 'background-color: #d4edda; color: green'
-                elif val <= 10: return 'background-color: #fff3cd; color: orange'
-            elif val == "Not in Top 100": return 'color: red'
-            return ''
-
-        st.dataframe(df.style.applymap(highlight_rank, subset=['Rank']), use_container_width=True)
-        
-        # --- EXCEL DOWNLOAD LOGIC ---
-        # Buffer create kar rahe hain (Memory mai file)
-        buffer = io.BytesIO()
-        
-        # Pandas ko use kar ke Excel write kar rahe hain
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Rankings')
+    if st.button("🚀 Check Rankings"):
+        if not api_key or not website_url:
+            st.error("Missing fields")
+        else:
+            keywords_list = [k.strip() for k in keywords_text.split('\n') if k.strip()]
+            results = []
+            progress = st.progress(0)
             
-        # File ka pointer start par la rahe hain taake download ho sake
-        buffer.seek(0)
-        
-        # File name banana
-        safe_city = target_location.split(',')[0].replace(" ", "_")
-        
-        st.download_button(
-            label="📥 Download Report (.xlsx)",
-            data=buffer,
-            file_name=f"Rankings_{safe_city}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+            for i, kw in enumerate(keywords_list):
+                rank, url = check_ranking(kw, target_location, website_url, api_key)
+                results.append({"Keyword": kw, "Location": target_location, "Rank": rank, "Found URL": url})
+                progress.progress((i + 1) / len(keywords_list))
+            
+            df = pd.DataFrame(results)
+            st.dataframe(df)
+            
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False)
+            st.download_button("📥 Download Report", buffer.getvalue(), "Single_Report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
