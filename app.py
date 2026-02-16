@@ -4,51 +4,40 @@ import pandas as pd
 import json
 import os
 import time
+import io  # Excel file memory mai banane ke liye zaroori hai
 
 # --- Page Config ---
 st.set_page_config(page_title="Serper Rank Tracker", page_icon="📈", layout="wide")
 
-st.title("📈 Bulk Keyword Rank Checker")
+st.title("📈 Bulk Google Rank Checker (Excel Output)")
 st.markdown("Check your website rankings accurately using **Serper.dev API** with specific city targeting.")
 
 # --- Helper Function: Load Locations ---
 @st.cache_data
 def get_locations():
-    # JSON file load karne ki koshish
     if os.path.exists('locations.json'):
         with open('locations.json', 'r', encoding='utf-8') as f:
             return json.load(f)
     else:
-        # Fallback agar user ne convert script run nahi ki
-        st.warning("⚠️ 'locations.json' file nahi mili. Auto-complete cities limited hain. Please 'convert_locations.py' run karen.")
-        return [
-            "New York, NY, United States", 
-            "London, United Kingdom", 
-            "Dubai, United Arab Emirates",
-            "Karachi, Pakistan"
-        ]
+        st.warning("⚠️ 'locations.json' file nahi mili. Please ensure you uploaded it to GitHub.")
+        return ["New York, NY, United States", "London, United Kingdom"]
 
-# Load locations into memory
 all_locations = get_locations()
 
 # --- Sidebar: Settings ---
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("⚙️ Settings")
+    api_key = st.text_input("Serper API Key", type="password", help="Serper.dev se API key lein")
     
-    # API Key
-    api_key = st.text_input("Serper API Key", type="password", help="Get key from serper.dev")
-    
-    # City Selection (Auto-Fetch Logic)
-    # Selectbox acts as a search bar for the list
     target_location = st.selectbox(
-        "📍 Select City (Type to search)",
+        "📍 Select Location (City)",
         options=all_locations,
         index=0,
-        placeholder="e.g. Sarasota...",
-        help="Type city name, and it will auto-suggest from the database."
+        placeholder="Type city name...",
+        help="City ka naam likhen, list auto-filter ho jayegi."
     )
     
-    st.info(f"Targeting: **{target_location}**")
+    st.success(f"Selected: **{target_location}**")
 
 # --- Main Inputs ---
 col1, col2 = st.columns([1, 2])
@@ -58,11 +47,10 @@ with col1:
     st.caption("Example: qualityrestorationservicesinc.com")
 
 with col2:
-    keywords_text = st.text_area("🔑 Keywords (1 per line)", height=150, placeholder="water damage restoration\nmold remediation\nkitchen remodeling")
+    keywords_text = st.text_area("🔑 Keywords (Har line mai ek keyword)", height=150, placeholder="water damage restoration\nmold remediation\nkitchen remodeling")
 
 # --- Logic: Check Rankings ---
 if st.button("🚀 Check Rankings"):
-    # Validation
     if not api_key:
         st.error("❌ Please enter Serper API Key.")
     elif not website_url:
@@ -70,28 +58,24 @@ if st.button("🚀 Check Rankings"):
     elif not keywords_text.strip():
         st.error("❌ Please enter at least one keyword.")
     else:
-        # Prepare Data
         keywords_list = [k.strip() for k in keywords_text.split('\n') if k.strip()]
         total_keywords = len(keywords_list)
         results = []
         
-        # UI Elements for Progress
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         st.write("---")
         
-        # Loop through keywords
         for i, keyword in enumerate(keywords_list):
-            status_text.text(f"⏳ Checking {i+1}/{total_keywords}: '{keyword}' in {target_location}...")
+            status_text.text(f"Checking {i+1}/{total_keywords}: '{keyword}'...")
             
-            # API Payload
             payload = json.dumps({
                 "q": keyword,
                 "location": target_location,
-                "gl": "us", # Standard Google Locale
-                "hl": "en", # Language
-                "num": 100  # Check top 100 results
+                "gl": "us",
+                "hl": "en",
+                "num": 100
             })
             
             headers = {
@@ -107,12 +91,10 @@ if st.button("🚀 Check Rankings"):
                 
                 if response.status_code == 200:
                     data = response.json()
-                    
-                    # Search for domain in organic results
                     if 'organic' in data:
                         for item in data['organic']:
-                            # Case insensitive check
-                            if website_url.lower().replace("https://", "").replace("http://", "").replace("www.", "").split('/')[0] in item['link'].lower():
+                            clean_target = website_url.replace("https://", "").replace("http://", "").replace("www.", "").split('/')[0]
+                            if clean_target.lower() in item['link'].lower():
                                 rank = item['position']
                                 found_url = item['link']
                                 break
@@ -123,7 +105,6 @@ if st.button("🚀 Check Rankings"):
                 rank = "Error"
                 found_url = str(e)
             
-            # Save Result
             results.append({
                 "Keyword": keyword,
                 "Location": target_location,
@@ -131,32 +112,41 @@ if st.button("🚀 Check Rankings"):
                 "Found URL": found_url
             })
             
-            # Update Progress
             progress_bar.progress((i + 1) / total_keywords)
-            time.sleep(0.1) # Thora pause taake API limit hit na ho
+            time.sleep(0.1)
 
         status_text.success("✅ Analysis Complete!")
         
         # --- Display Results ---
         df = pd.DataFrame(results)
         
-        # Color formatting function for Rank column
+        # Table Styling
         def highlight_rank(val):
-            color = ''
             if isinstance(val, int):
-                if val <= 3: color = 'background-color: #d4edda; color: green' # Top 3
-                elif val <= 10: color = 'background-color: #fff3cd; color: orange' # Top 10
-            elif val == "Not in Top 100": color = 'color: red'
-            return color
+                if val <= 3: return 'background-color: #d4edda; color: green'
+                elif val <= 10: return 'background-color: #fff3cd; color: orange'
+            elif val == "Not in Top 100": return 'color: red'
+            return ''
 
-        # Show Table
         st.dataframe(df.style.applymap(highlight_rank, subset=['Rank']), use_container_width=True)
         
-        # --- CSV Download ---
-        csv_data = df.to_csv(index=False).encode('utf-8')
+        # --- EXCEL DOWNLOAD LOGIC ---
+        # Buffer create kar rahe hain (Memory mai file)
+        buffer = io.BytesIO()
+        
+        # Pandas ko use kar ke Excel write kar rahe hain
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Rankings')
+            
+        # File ka pointer start par la rahe hain taake download ho sake
+        buffer.seek(0)
+        
+        # File name banana
+        safe_city = target_location.split(',')[0].replace(" ", "_")
+        
         st.download_button(
-            label="📥 Download Report (Excel/CSV)",
-            data=csv_data,
-            file_name=f"Rankings_{target_location.split(',')[0]}_{website_url}.csv",
-            mime="text/csv"
+            label="📥 Download Report (.xlsx)",
+            data=buffer,
+            file_name=f"Rankings_{safe_city}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
