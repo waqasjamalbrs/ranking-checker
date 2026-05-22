@@ -1,255 +1,362 @@
 import streamlit as st
-import requests
 import pandas as pd
-import json
-import os
 import time
+import re
+import json
 import io
+from serpapi import GoogleSearch
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
-# --- Page Config ---
-st.set_page_config(page_title="Ultimate Rank Tracker", page_icon="📈", layout="wide")
-
-st.title("📈 Google Rank Checker (Bulletproof Local & Organic)")
-st.markdown("Universal Location Lock, Index-Mismatch Fixed & State Translation Active.")
-
-# --- Comprehensive US States Dictionary for Exact Canonical Match ---
+# ─────────────────────────────────────────────
+#  US STATE ABBREVIATIONS
+# ─────────────────────────────────────────────
 US_STATES = {
-    "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas", "ca": "california",
-    "co": "colorado", "ct": "connecticut", "de": "delaware", "fl": "florida", "ga": "georgia",
-    "hi": "hawaii", "id": "idaho", "il": "illinois", "in": "indiana", "ia": "iowa",
-    "ks": "kansas", "ky": "kentucky", "la": "louisiana", "me": "maine", "md": "maryland",
-    "ma": "massachusetts", "mi": "michigan", "mn": "minnesota", "ms": "mississippi",
-    "mo": "missouri", "mt": "montana", "ne": "nebraska", "nv": "nevada", "nh": "new hampshire",
-    "nj": "new jersey", "nm": "new mexico", "ny": "new york", "nc": "north carolina",
-    "nd": "north dakota", "oh": "ohio", "ok": "oklahoma", "or": "oregon", "pa": "pennsylvania",
-    "ri": "rhode island", "sc": "south carolina", "sd": "south dakota", "tn": "tennessee",
-    "tx": "texas", "ut": "utah", "vt": "vermont", "va": "virginia", "wa": "washington",
-    "wv": "west virginia", "wi": "wisconsin", "wy": "wyoming"
+    "al": "Alabama", "ak": "Alaska", "az": "Arizona", "ar": "Arkansas",
+    "ca": "California", "co": "Colorado", "ct": "Connecticut", "de": "Delaware",
+    "fl": "Florida", "ga": "Georgia", "hi": "Hawaii", "id": "Idaho",
+    "il": "Illinois", "in": "Indiana", "ia": "Iowa", "ks": "Kansas",
+    "ky": "Kentucky", "la": "Louisiana", "me": "Maine", "md": "Maryland",
+    "ma": "Massachusetts", "mi": "Michigan", "mn": "Minnesota", "ms": "Mississippi",
+    "mo": "Missouri", "mt": "Montana", "ne": "Nebraska", "nv": "Nevada",
+    "nh": "New Hampshire", "nj": "New Jersey", "nm": "New Mexico", "ny": "New York",
+    "nc": "North Carolina", "nd": "North Dakota", "oh": "Ohio", "ok": "Oklahoma",
+    "or": "Oregon", "pa": "Pennsylvania", "ri": "Rhode Island", "sc": "South Carolina",
+    "sd": "South Dakota", "tn": "Tennessee", "tx": "Texas", "ut": "Utah",
+    "vt": "Vermont", "va": "Virginia", "wa": "Washington", "wv": "West Virginia",
+    "wi": "Wisconsin", "wy": "Wyoming", "dc": "District of Columbia",
 }
 
-# --- Helper Function: Load Locations ---
+# ─────────────────────────────────────────────
+#  LOAD GOOGLE ADS LOCATIONS
+# ─────────────────────────────────────────────
 @st.cache_data
-def get_locations():
-    if os.path.exists('locations.json'):
-        with open('locations.json', 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return []
+def load_locations():
+    try:
+        with open("locations.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Flatten to a list of canonical strings like "Seattle, Washington, United States"
+        locations = []
+        for item in data:
+            name = item.get("Name", "")
+            if name:
+                locations.append(name)
+        return locations
+    except Exception as e:
+        st.error(f"locations.json load error: {e}")
+        return []
 
-all_locations = get_locations()
-
-# --- SMART & CLEAN LOCATION MATCHER (State Bug Fixed) ---
-def find_precise_location(city, state, all_locs, country_name):
+# ─────────────────────────────────────────────
+#  SMART LOCATION MATCHER  (FIXED)
+#
+#  KEY FIX: City is the primary signal.
+#  State is only used as a tiebreaker when
+#  multiple cities with the same name exist.
+#  We NEVER force a wrong state onto a city.
+# ─────────────────────────────────────────────
+def find_precise_location(city: str, state: str, all_locs: list, country_name: str) -> str:
     city = str(city).strip()
     state_input = str(state).strip().lower()
-    
-    # 1. State abbreviation ko full name mai convert karo (e.g., 'fl' -> 'Florida')
-    if state_input in US_STATES:
-        full_state_name = US_STATES[state_input].title()
-    else:
-        full_state_name = str(state).strip().title()
-        
-    candidates = [loc for loc in all_locs if loc.lower().startswith(city.lower())]
-    
-    # 2. Match with full state name
-    if full_state_name:
-        filtered = [c for c in candidates if full_state_name.lower() in c.lower()]
-        if filtered:
-            return filtered[0]
-            
-    if candidates:
-        return candidates[0]
-        
-    # 3. BULLETPROOF FALLBACK: Google Ads Canonical Format
+
+    # Resolve state abbreviation → full name
+    full_state_name = US_STATES.get(state_input, str(state).strip().title())
+
+    # ── PASS 1: Exact match  city + state + country ──────────────────────
+    # e.g. "Seattle, Washington, United States"
+    for loc in all_locs:
+        loc_lower = loc.lower()
+        if (city.lower() in loc_lower
+                and full_state_name.lower() in loc_lower
+                and country_name.lower() in loc_lower):
+            return loc
+
+    # ── PASS 2: City + country (ignore state) ────────────────────────────
+    # This is the CRITICAL fix:
+    # If "Bothell, Florida, United States" doesn't exist but
+    # "Bothell, Washington, United States" does, we still return it.
+    country_city_matches = [
+        loc for loc in all_locs
+        if city.lower() in loc.lower()
+        and country_name.lower() in loc.lower()
+    ]
+
+    if len(country_city_matches) == 1:
+        # Only one city with this name in the country → safe to return
+        return country_city_matches[0]
+
+    if len(country_city_matches) > 1:
+        # Multiple cities share this name → try state as tiebreaker
+        state_filtered = [
+            c for c in country_city_matches
+            if full_state_name.lower() in c.lower()
+        ]
+        if state_filtered:
+            return state_filtered[0]
+        # State tiebreaker also failed → return first country match
+        # (still better than a wrong-country result)
+        return country_city_matches[0]
+
+    # ── PASS 3: City only (any country) ──────────────────────────────────
+    city_only_matches = [
+        loc for loc in all_locs
+        if loc.lower().startswith(city.lower())
+    ]
+    if city_only_matches:
+        return city_only_matches[0]
+
+    # ── PASS 4: Canonical fallback ────────────────────────────────────────
+    # Google Ads accepts "City, State, Country" even if not in our list
     if full_state_name:
         return f"{city}, {full_state_name}, {country_name}"
-        
     return f"{city}, {country_name}"
 
-# --- CORE API ENGINE ---
-def check_ranking(keyword, location, website_url, api_key, gl_code, check_depth):
-    gl_code = str(gl_code).strip().lower()
-    
-    payload_dict = {
-        "q": keyword, 
-        "location": location, 
-        "gl": gl_code, 
-        "hl": "en"
-    }
-    
-    if "100" in check_depth:
-        payload_dict["num"] = 100
-        
-    payload = json.dumps(payload_dict)
-    headers = {'X-API-KEY': api_key, 'Content-Type': 'application/json'}
-    
+
+# ─────────────────────────────────────────────
+#  SERPAPI: CHECK ORGANIC RANK
+# ─────────────────────────────────────────────
+def check_organic_rank(keyword: str, domain: str, location: str, api_key: str):
+    """Returns (rank, found_url) or ("Not in Top 100", "-")"""
     try:
-        response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
-        if response.status_code == 200:
-            data = response.json()
-            
-            organic_rank = "Not in Top 100" if "100" in check_depth else "Not in Top 10"
-            maps_rank = "Not in Map Pack"
-            found_url = "-"
-            
-            clean_target = website_url.replace("https://", "").replace("http://", "").replace("www.", "").split('/')[0].lower()
-            
-            # 1. MAPS/PLACES SCAN
-            if 'places' in data:
-                for i, place in enumerate(data['places']):
-                    place_url = place.get('website', place.get('link', '')).lower()
-                    if clean_target in place_url:
-                        maps_rank = f"#{i + 1} (Maps)"
-                        found_url = place.get('website', '')
-                        break
-                        
-            # 2. ORGANIC LINKS SCAN
-            if 'organic' in data:
-                for item in data['organic']:
-                    if clean_target in item.get('link', '').lower():
-                        organic_rank = item['position']
-                        if found_url == "-":
-                            found_url = item.get('link', '')
-                        break
-                        
-            return organic_rank, maps_rank, found_url
-        else:
-            return f"API Error {response.status_code}", "Error", "-"
+        params = {
+            "engine": "google",
+            "q": keyword,
+            "location": location,
+            "num": 100,
+            "api_key": api_key,
+            "gl": "us",
+            "hl": "en",
+        }
+        search = GoogleSearch(params)
+        results = search.get_dict()
+
+        organic = results.get("organic_results", [])
+        for i, result in enumerate(organic, start=1):
+            url = result.get("link", "")
+            if domain.lower().replace("www.", "") in url.lower().replace("www.", ""):
+                return i, url
+
+        return "Not in Top 100", "-"
+
     except Exception as e:
-        return "Error", str(e), "-"
+        return f"Error: {e}", "-"
 
-# --- Sidebar Configuration ---
+
+# ─────────────────────────────────────────────
+#  SERPAPI: CHECK MAPS / LOCAL PACK RANK
+# ─────────────────────────────────────────────
+def check_maps_rank(keyword: str, domain: str, location: str, api_key: str):
+    """Returns rank in local pack or 'Not in Map Pack'"""
+    try:
+        params = {
+            "engine": "google",
+            "q": keyword,
+            "location": location,
+            "api_key": api_key,
+            "gl": "us",
+            "hl": "en",
+        }
+        search = GoogleSearch(params)
+        results = search.get_dict()
+
+        local_results = results.get("local_results", {})
+        places = local_results.get("places", []) if isinstance(local_results, dict) else []
+
+        for i, place in enumerate(places, start=1):
+            website = place.get("website", "")
+            if domain.lower().replace("www.", "") in website.lower().replace("www.", ""):
+                return i
+
+        return "Not in Map Pack"
+
+    except Exception as e:
+        return f"Error: {e}"
+
+
+# ─────────────────────────────────────────────
+#  EXCEL REPORT BUILDER
+# ─────────────────────────────────────────────
+def build_excel_report(results_df: pd.DataFrame) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Ranking Report"
+
+    # ── Header styling ──
+    header_fill = PatternFill("solid", fgColor="1F4E79")
+    header_font = Font(color="FFFFFF", bold=True, size=11)
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    thin = Side(style="thin", color="CCCCCC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    columns = ["#", "Keyword", "City", "State", "Targeted Location",
+               "Organic Rank", "Maps Rank", "Found URL"]
+
+    col_widths = [5, 40, 15, 8, 35, 14, 12, 50]
+
+    for col_idx, (col_name, width) in enumerate(zip(columns, col_widths), start=1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_align
+        cell.border = border
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    ws.row_dimensions[1].height = 30
+
+    # ── Data rows ──
+    for row_idx, row in results_df.iterrows():
+        excel_row = row_idx + 2
+        values = [
+            row_idx + 1,
+            row.get("Keyword", ""),
+            row.get("City", ""),
+            row.get("State", ""),
+            row.get("Targeted Location", ""),
+            row.get("Organic Rank", ""),
+            row.get("Maps Rank", ""),
+            row.get("Found URL", ""),
+        ]
+
+        for col_idx, value in enumerate(values, start=1):
+            cell = ws.cell(row=excel_row, column=col_idx, value=value)
+            cell.border = border
+            cell.alignment = Alignment(vertical="center", wrap_text=(col_idx == 8))
+
+            # Color-code organic rank
+            if col_idx == 6:
+                if isinstance(value, int) and value <= 3:
+                    cell.fill = PatternFill("solid", fgColor="C6EFCE")
+                    cell.font = Font(color="276221", bold=True)
+                elif isinstance(value, int) and value <= 10:
+                    cell.fill = PatternFill("solid", fgColor="FFEB9C")
+                    cell.font = Font(color="9C5700")
+                elif value == "Not in Top 100":
+                    cell.fill = PatternFill("solid", fgColor="FFC7CE")
+                    cell.font = Font(color="9C0006")
+
+        ws.row_dimensions[excel_row].height = 20
+
+    # Freeze header row
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ─────────────────────────────────────────────
+#  STREAMLIT UI
+# ─────────────────────────────────────────────
+st.set_page_config(
+    page_title="Rank Checker",
+    page_icon="📊",
+    layout="wide",
+)
+
+st.title("📊 Google Rank Checker")
+st.markdown("Upload your keyword sheet, enter your domain and SerpApi key, then run.")
+
+# ── Sidebar inputs ──
 with st.sidebar:
-    st.header("⚙️ Configuration")
-    api_key = st.text_input("Serper API Key", type="password")
-    website_url = st.text_input("🌐 Website URL", placeholder="example.com")
-    
-    st.divider()
-    st.subheader("🌍 Regional Settings")
-    gl_options = {
-        "United States (US)": "us",
-        "United Kingdom (UK)": "uk",
-        "Canada (CA)": "ca",
-        "Australia (AU)": "au",
-        "United Arab Emirates (AE)": "ae",
-        "Pakistan (PK)": "pk"
-    }
-    selected_country_name = st.selectbox("Google Country Engine:", options=list(gl_options.keys()))
-    current_gl = gl_options[selected_country_name]
-    clean_country_name = selected_country_name.split(" (")[0]
-    
-    check_depth = st.radio(
-        "Search Strategy:", 
-        ["Top 10 + Map Pack (Best for Local)", "Top 100 Organic (Hides Map Pack)"]
+    st.header("⚙️ Settings")
+    api_key = st.text_input("SerpApi Key", type="password", placeholder="Your SerpApi key")
+    domain = st.text_input("Domain to Track", placeholder="e.g. example.com")
+    country_name = st.selectbox(
+        "Country",
+        ["United States", "Canada", "United Kingdom", "Australia", "India", "Pakistan"],
+        index=0,
     )
-    
-    st.divider()
-    mode = st.radio("Select Mode:", ["📝 Manual Entry (UI Table)", "📂 Bulk Upload (Excel)"])
+    delay = st.slider("Delay between requests (sec)", 1, 10, 2)
 
-# --- SAFE DATAFRAME PROCESSOR (Guarantees Perfect Row Alignment) ---
-def process_clean_dataframe(df_input):
-    results = []
-    progress = st.progress(0)
-    status = st.empty()
-    
-    df_input = df_input.fillna("")
-    total = len(df_input)
-    
-    for i in range(total):
-        row = df_input.iloc[i]
-        kw = str(row.get('Keyword', '')).strip()
-        city = str(row.get('City', '')).strip()
-        state = str(row.get('State', '')) if 'State' in df_input.columns else ""
-        
-        if not kw or not city:
-            continue
-            
-        matched_location = find_precise_location(city, state, all_locations, clean_country_name)
-        
-        # Helper logic for visual confirmation of fallback usage
-        note = ""
-        expected_fallback = ""
-        if state.strip():
-            state_val = US_STATES.get(state.lower().strip(), state.title().strip())
-            expected_fallback = f"{city}, {state_val.title()}, {clean_country_name}"
-        else:
-            expected_fallback = f"{city}, {clean_country_name}"
-            
-        if matched_location == expected_fallback:
-             note = " (⚠️ Auto-Format)"
-        
-        status.text(f"Processing {i+1}/{total}: '{kw}' in {city}...")
-        
-        org_rank, map_rank, url = check_ranking(kw, matched_location, website_url, api_key, current_gl, check_depth)
-        
-        results.append({
-            "Keyword": kw,
-            "City": city,
-            "State": state,
-            "Targeted Location": matched_location + note,
-            "Organic Rank": org_rank,
-            "Maps Rank": map_rank,
-            "Found URL": url
-        })
-        
-        progress.progress((i + 1) / total)
-        time.sleep(0.1)
-        
-    status.success("✅ Process Completed Successfully!")
-    return pd.DataFrame(results)
+# ── File upload ──
+uploaded_file = st.file_uploader(
+    "Upload Excel file (.xlsx)",
+    type=["xlsx"],
+    help="Required columns: Keyword, City, State",
+)
 
-# ==========================================
-# MODE 1: MANUAL ENTRY (UI TABLE)
-# ==========================================
-if mode == "📝 Manual Entry (UI Table)":
-    st.subheader("📝 Direct Manual Entry")
-    
-    if 'manual_df' not in st.session_state:
-        st.session_state.manual_df = pd.DataFrame([
-            {"Keyword": "water damage restoration", "City": "Cape Coral", "State": "FL"},
-            {"Keyword": "kitchen remodeling", "City": "Venice", "State": "FL"},
-            {"Keyword": "mold remediation", "City": "Sarasota", "State": "FL"}
-        ])
-        
-    edited_df = st.data_editor(st.session_state.manual_df, num_rows="dynamic", use_container_width=True)
-    
-    if st.button("🚀 Check Rankings"):
-        if not api_key or not website_url:
-            st.error("❌ Please enter API Key and Website URL in sidebar.")
-        else:
-            cleaned_df = edited_df.dropna(subset=['Keyword', 'City'])
-            cleaned_df = cleaned_df[cleaned_df['Keyword'].str.strip() != ""]
-            
-            if cleaned_df.empty:
-                st.warning("⚠️ Table is empty. Please enter data.")
-            else:
-                df_results = process_clean_dataframe(cleaned_df)
-                st.dataframe(df_results, use_container_width=True)
-                
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df_results.to_excel(writer, index=False)
-                st.download_button("📥 Download Report", buffer.getvalue(), "Manual_Rankings.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+if uploaded_file:
+    try:
+        df = pd.read_excel(uploaded_file)
+        df.columns = [c.strip() for c in df.columns]
 
-# ==========================================
-# MODE 2: BULK UPLOAD (EXCEL)
-# ==========================================
-elif mode == "📂 Bulk Upload (Excel)":
-    st.subheader("📂 Bulk Check via Excel Upload")
-    
-    uploaded_file = st.file_uploader("Upload Excel (.xlsx)", type=['xlsx'])
-    
-    if uploaded_file and website_url and api_key:
-        df_upload = pd.read_excel(uploaded_file)
-        df_upload.columns = [str(c).strip().title() for c in df_upload.columns]
-        
-        if not all(col in df_upload.columns for col in ['Keyword', 'City']):
-            st.error("❌ Excel must have columns: Keyword, City")
-        else:
-            if st.button("🚀 Start Bulk Checking"):
-                df_results = process_clean_dataframe(df_upload)
-                st.dataframe(df_results, use_container_width=True)
-                
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df_results.to_excel(writer, index=False)
-                st.download_button("📥 Download Final Report", buffer.getvalue(), "Bulk_Rankings.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        # Validate columns
+        required_cols = {"Keyword", "City", "State"}
+        missing = required_cols - set(df.columns)
+        if missing:
+            st.error(f"Missing columns: {missing}")
+            st.stop()
+
+        st.success(f"✅ Loaded {len(df)} keywords")
+        st.dataframe(df, use_container_width=True)
+
+        if st.button("🚀 Start Rank Check", type="primary"):
+            if not api_key:
+                st.error("Please enter your SerpApi key.")
+                st.stop()
+            if not domain:
+                st.error("Please enter a domain to track.")
+                st.stop()
+
+            all_locs = load_locations()
+            results = []
+
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            results_placeholder = st.empty()
+
+            for i, row in df.iterrows():
+                keyword = str(row["Keyword"]).strip()
+                city = str(row["City"]).strip()
+                state = str(row["State"]).strip()
+
+                status_text.text(f"Checking {i+1}/{len(df)}: {keyword}")
+
+                # ── FIXED: use smart location matcher ──
+                targeted_location = find_precise_location(
+                    city, state, all_locs, country_name
+                )
+
+                organic_rank, found_url = check_organic_rank(
+                    keyword, domain, targeted_location, api_key
+                )
+                maps_rank = check_maps_rank(
+                    keyword, domain, targeted_location, api_key
+                )
+
+                results.append({
+                    "Keyword": keyword,
+                    "City": city,
+                    "State": state,
+                    "Targeted Location": targeted_location,
+                    "Organic Rank": organic_rank,
+                    "Maps Rank": maps_rank,
+                    "Found URL": found_url,
+                })
+
+                progress_bar.progress((i + 1) / len(df))
+
+                # Show live results table
+                results_df = pd.DataFrame(results)
+                results_placeholder.dataframe(results_df, use_container_width=True)
+
+                if i < len(df) - 1:
+                    time.sleep(delay)
+
+            status_text.success("✅ Process Completed Successfully!")
+
+            # ── Download button ──
+            results_df = pd.DataFrame(results)
+            excel_bytes = build_excel_report(results_df)
+
+            st.download_button(
+                label="📥 Download Final Report",
+                data=excel_bytes,
+                file_name="ranking_report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+    except Exception as e:
+        st.error(f"File read error: {e}")
