@@ -109,7 +109,7 @@ def check_ranking(keyword, location, website_url, api_key, gl_code, check_depth)
                         current_global_position += 1
                         
                         if clean_target in item.get('link', '').lower():
-                            organic_rank = item.get('position', current_global_position)
+                            organic_rank = current_global_position
                             
                             if found_url == "-":
                                 found_url = item.get('link', '')
