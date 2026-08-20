@@ -9,8 +9,9 @@ import io
 # --- Page Config ---
 st.set_page_config(page_title="Ultimate Rank Tracker", page_icon="📈", layout="wide")
 
-st.title("📈 Google Rank Checker (Bulletproof Local & Organic)")
+st.title("📈 Google Rank Checker (Top 100 & Local Maps)")
 st.markdown("Universal Location Lock, Index-Mismatch Fixed & State Translation Active.")
+st.markdown("**Note:** Getting Top 100 results now uses pagination (up to 10 API calls per keyword) due to Google's deprecation of `num=100`.")
 
 # --- Comprehensive US States Dictionary for Exact Canonical Match ---
 US_STATES = {
@@ -42,7 +43,6 @@ def find_precise_location(city, state, all_locs, country_name):
     city = str(city).strip()
     state_input = str(state).strip().lower()
     
-    # 1. State abbreviation ko full name mai convert karo (e.g., 'fl' -> 'Florida')
     if state_input in US_STATES:
         full_state_name = US_STATES[state_input].title()
     else:
@@ -50,7 +50,6 @@ def find_precise_location(city, state, all_locs, country_name):
         
     candidates = [loc for loc in all_locs if loc.lower().startswith(city.lower())]
     
-    # 2. Match with full state name
     if full_state_name:
         filtered = [c for c in candidates if full_state_name.lower() in c.lower()]
         if filtered:
@@ -59,63 +58,83 @@ def find_precise_location(city, state, all_locs, country_name):
     if candidates:
         return candidates[0]
         
-    # 3. BULLETPROOF FALLBACK: Google Ads Canonical Format
     if full_state_name:
         return f"{city}, {full_state_name}, {country_name}"
         
     return f"{city}, {country_name}"
 
-# --- CORE API ENGINE ---
+# --- CORE API ENGINE WITH PAGINATION ---
 def check_ranking(keyword, location, website_url, api_key, gl_code, check_depth):
     gl_code = str(gl_code).strip().lower()
     
-    payload_dict = {
-        "q": keyword, 
-        "location": location, 
-        "gl": gl_code, 
-        "hl": "en"
-    }
+    organic_rank = "Not in Top 100" if "100" in check_depth else "Not in Top 10"
+    maps_rank = "Not in Map Pack"
+    found_url = "-"
     
-    if "100" in check_depth:
-        payload_dict["num"] = 100
-        
-    payload = json.dumps(payload_dict)
+    clean_target = website_url.replace("https://", "").replace("http://", "").replace("www.", "").split('/')[0].lower()
+    
+    # 🌟 MAGIC HAPPENS HERE: Set loop range based on check_depth
+    max_pages = 10 if "100" in check_depth else 1
     headers = {'X-API-KEY': api_key, 'Content-Type': 'application/json'}
     
-    try:
-        response = requests.post("https://google.serper.dev/search", headers=headers, data=payload)
-        if response.status_code == 200:
-            data = response.json()
-            
-            organic_rank = "Not in Top 100" if "100" in check_depth else "Not in Top 10"
-            maps_rank = "Not in Map Pack"
-            found_url = "-"
-            
-            clean_target = website_url.replace("https://", "").replace("http://", "").replace("www.", "").split('/')[0].lower()
-            
-            # 1. MAPS/PLACES SCAN
-            if 'places' in data:
-                for i, place in enumerate(data['places']):
-                    place_url = place.get('website', place.get('link', '')).lower()
-                    if clean_target in place_url:
-                        maps_rank = f"#{i + 1} (Maps)"
-                        found_url = place.get('website', '')
-                        break
+    current_global_position = 0
+
+    for page_num in range(1, max_pages + 1):
+        payload_dict = {
+            "q": keyword, 
+            "location": location, 
+            "gl": gl_code, 
+            "hl": "en",
+            "page": page_num  # Requesting page by page
+        }
+        
+        try:
+            response = requests.post("https://google.serper.dev/search", headers=headers, json=payload_dict)
+            if response.status_code == 200:
+                data = response.json()
+                
+                # 1. MAPS/PLACES SCAN (Only check on page 1)
+                if page_num == 1 and 'places' in data and maps_rank == "Not in Map Pack":
+                    for i, place in enumerate(data['places']):
+                        place_url = place.get('website', place.get('link', '')).lower()
+                        if clean_target in place_url:
+                            maps_rank = f"#{i + 1} (Maps)"
+                            if found_url == "-":
+                                found_url = place.get('website', '')
+                            break
+                            
+                # 2. ORGANIC LINKS SCAN
+                if 'organic' in data:
+                    for item in data['organic']:
+                        current_global_position += 1
                         
-            # 2. ORGANIC LINKS SCAN
-            if 'organic' in data:
-                for item in data['organic']:
-                    if clean_target in item.get('link', '').lower():
-                        organic_rank = item['position']
-                        if found_url == "-":
-                            found_url = item.get('link', '')
+                        if clean_target in item.get('link', '').lower():
+                            organic_rank = item.get('position', current_global_position)
+                            
+                            if found_url == "-":
+                                found_url = item.get('link', '')
+                                
+                            # Target found! Stop fetching more pages.
+                            return organic_rank, maps_rank, found_url
+                            
+                    # If page has very few results, Google might have stopped paginating
+                    if len(data['organic']) < 5: 
                         break
-                        
-            return organic_rank, maps_rank, found_url
-        else:
-            return f"API Error {response.status_code}", "Error", "-"
-    except Exception as e:
-        return "Error", str(e), "-"
+                else:
+                    break # No organic results at all
+            else:
+                if page_num == 1:
+                    return f"API Error {response.status_code}", "Error", "-"
+                else:
+                    break # If it fails on page 2+, just return what we got
+                    
+        except Exception as e:
+            if page_num == 1:
+                return "Error", str(e), "-"
+            else:
+                break
+                
+    return organic_rank, maps_rank, found_url
 
 # --- Sidebar Configuration ---
 with st.sidebar:
@@ -139,13 +158,13 @@ with st.sidebar:
     
     check_depth = st.radio(
         "Search Strategy:", 
-        ["Top 10 + Map Pack (Best for Local)", "Top 100 Organic (Hides Map Pack)"]
+        ["Top 10 + Map Pack (1 API Credit)", "Top 100 Organic (Up to 10 API Credits)"]
     )
     
     st.divider()
     mode = st.radio("Select Mode:", ["📝 Manual Entry (UI Table)", "📂 Bulk Upload (Excel)"])
 
-# --- SAFE DATAFRAME PROCESSOR (Guarantees Perfect Row Alignment) ---
+# --- SAFE DATAFRAME PROCESSOR ---
 def process_clean_dataframe(df_input):
     results = []
     progress = st.progress(0)
@@ -165,9 +184,7 @@ def process_clean_dataframe(df_input):
             
         matched_location = find_precise_location(city, state, all_locations, clean_country_name)
         
-        # Helper logic for visual confirmation of fallback usage
         note = ""
-        expected_fallback = ""
         if state.strip():
             state_val = US_STATES.get(state.lower().strip(), state.title().strip())
             expected_fallback = f"{city}, {state_val.title()}, {clean_country_name}"
