@@ -10,8 +10,8 @@ import io
 st.set_page_config(page_title="Ultimate Rank Tracker", page_icon="📈", layout="wide")
 
 st.title("📈 Google Rank Checker (Top 100 & Local Maps)")
-st.markdown("Universal Location Lock, Index-Mismatch Fixed & State Translation Active.")
-st.markdown("**Note:** Getting Top 100 results now uses pagination (up to 10 API calls per keyword) due to Google's deprecation of `num=100`.")
+st.markdown("Universal Location Lock, National/Global Search Support & State Translation Active.")
+st.markdown("**Note:** Getting Top 100 results uses pagination (up to 10 API calls per keyword) due to Google's deprecation of `num=100`.")
 
 # --- Comprehensive US States Dictionary for Exact Canonical Match ---
 US_STATES = {
@@ -38,30 +38,38 @@ def get_locations():
 
 all_locations = get_locations()
 
-# --- SMART & CLEAN LOCATION MATCHER (State Bug Fixed) ---
+# --- SMART & CLEAN LOCATION MATCHER (Handles Empty/Optional City & State) ---
 def find_precise_location(city, state, all_locs, country_name):
-    city = str(city).strip()
-    state_input = str(state).strip().lower()
+    city = str(city).strip() if city and str(city).lower() != "none" else ""
+    state_input = str(state).strip().lower() if state and str(state).lower() != "none" else ""
+    
+    # Agar dono City aur State empty hain, toh National/Country Level
+    if not city and not state_input:
+        return None  # No specific local target; national search
     
     if state_input in US_STATES:
         full_state_name = US_STATES[state_input].title()
     else:
-        full_state_name = str(state).strip().title()
+        full_state_name = str(state).strip().title() if state else ""
         
-    candidates = [loc for loc in all_locs if loc.lower().startswith(city.lower())]
-    
-    if full_state_name:
-        filtered = [c for c in candidates if full_state_name.lower() in c.lower()]
-        if filtered:
-            return filtered[0]
+    if city:
+        candidates = [loc for loc in all_locs if loc.lower().startswith(city.lower())]
+        
+        if full_state_name:
+            filtered = [c for c in candidates if full_state_name.lower() in c.lower()]
+            if filtered:
+                return filtered[0]
+                
+        if candidates:
+            return candidates[0]
             
-    if candidates:
-        return candidates[0]
-        
-    if full_state_name:
-        return f"{city}, {full_state_name}, {country_name}"
-        
-    return f"{city}, {country_name}"
+        if full_state_name:
+            return f"{city}, {full_state_name}, {country_name}"
+            
+        return f"{city}, {country_name}"
+    else:
+        # Sirf state di gayi ho
+        return f"{full_state_name}, {country_name}"
 
 # --- CORE API ENGINE WITH PAGINATION ---
 def check_ranking(keyword, location, website_url, api_key, gl_code, check_depth):
@@ -73,7 +81,6 @@ def check_ranking(keyword, location, website_url, api_key, gl_code, check_depth)
     
     clean_target = website_url.replace("https://", "").replace("http://", "").replace("www.", "").split('/')[0].lower()
     
-    # 🌟 MAGIC HAPPENS HERE: Set loop range based on check_depth
     max_pages = 10 if "100" in check_depth else 1
     headers = {'X-API-KEY': api_key, 'Content-Type': 'application/json'}
     
@@ -82,18 +89,20 @@ def check_ranking(keyword, location, website_url, api_key, gl_code, check_depth)
     for page_num in range(1, max_pages + 1):
         payload_dict = {
             "q": keyword, 
-            "location": location, 
             "gl": gl_code, 
             "hl": "en",
-            "page": page_num  # Requesting page by page
+            "page": page_num
         }
+        # Location sirf tab add karein agar di gayi ho (warna National search hoga)
+        if location:
+            payload_dict["location"] = location
         
         try:
             response = requests.post("https://google.serper.dev/search", headers=headers, json=payload_dict)
             if response.status_code == 200:
                 data = response.json()
                 
-                # 1. MAPS/PLACES SCAN (Only check on page 1)
+                # 1. MAPS/PLACES SCAN (Only on page 1)
                 if page_num == 1 and 'places' in data and maps_rank == "Not in Map Pack":
                     for i, place in enumerate(data['places']):
                         place_url = place.get('website', place.get('link', '')).lower()
@@ -114,19 +123,19 @@ def check_ranking(keyword, location, website_url, api_key, gl_code, check_depth)
                             if found_url == "-":
                                 found_url = item.get('link', '')
                                 
-                            # Target found! Stop fetching more pages.
+                            # Target found! Stop fetching further pages
                             return organic_rank, maps_rank, found_url
                             
-                    # If page has very few results, Google might have stopped paginating
+                    # If page has very few results, stop pagination
                     if len(data['organic']) < 5: 
                         break
                 else:
-                    break # No organic results at all
+                    break
             else:
                 if page_num == 1:
                     return f"API Error {response.status_code}", "Error", "-"
                 else:
-                    break # If it fails on page 2+, just return what we got
+                    break
                     
         except Exception as e:
             if page_num == 1:
@@ -177,32 +186,38 @@ def process_clean_dataframe(df_input):
         row = df_input.iloc[i]
         kw = str(row.get('Keyword', '')).strip()
         city = str(row.get('City', '')).strip()
-        state = str(row.get('State', '')) if 'State' in df_input.columns else ""
+        state = str(row.get('State', '')).strip() if 'State' in df_input.columns else ""
         
-        if not kw or not city:
+        # Ab sirf Keyword mandatory hai
+        if not kw or kw.lower() == "none":
             continue
             
         matched_location = find_precise_location(city, state, all_locations, clean_country_name)
         
         note = ""
-        if state.strip():
-            state_val = US_STATES.get(state.lower().strip(), state.title().strip())
-            expected_fallback = f"{city}, {state_val.title()}, {clean_country_name}"
+        if matched_location:
+            target_display = matched_location
+            if state.strip():
+                state_val = US_STATES.get(state.lower().strip(), state.title().strip())
+                expected_fallback = f"{city}, {state_val.title()}, {clean_country_name}"
+            else:
+                expected_fallback = f"{city}, {clean_country_name}"
+                
+            if matched_location == expected_fallback:
+                note = " (⚠️ Auto-Format)"
         else:
-            expected_fallback = f"{city}, {clean_country_name}"
-            
-        if matched_location == expected_fallback:
-             note = " (⚠️ Auto-Format)"
+            target_display = f"National ({clean_country_name})"
         
-        status.text(f"Processing {i+1}/{total}: '{kw}' in {city}...")
+        log_loc = city if city else clean_country_name
+        status.text(f"Processing {i+1}/{total}: '{kw}' in {log_loc}...")
         
         org_rank, map_rank, url = check_ranking(kw, matched_location, website_url, api_key, current_gl, check_depth)
         
         results.append({
             "Keyword": kw,
-            "City": city,
-            "State": state,
-            "Targeted Location": matched_location + note,
+            "City": city if city and city.lower() != "none" else "-",
+            "State": state if state and state.lower() != "none" else "-",
+            "Targeted Location": target_display + note,
             "Organic Rank": org_rank,
             "Maps Rank": map_rank,
             "Found URL": url
@@ -222,9 +237,9 @@ if mode == "📝 Manual Entry (UI Table)":
     
     if 'manual_df' not in st.session_state:
         st.session_state.manual_df = pd.DataFrame([
+            {"Keyword": "best bangs for thick hair", "City": "", "State": ""},
             {"Keyword": "water damage restoration", "City": "Cape Coral", "State": "FL"},
-            {"Keyword": "kitchen remodeling", "City": "Venice", "State": "FL"},
-            {"Keyword": "mold remediation", "City": "Sarasota", "State": "FL"}
+            {"Keyword": "kitchen remodeling", "City": "Venice", "State": "FL"}
         ])
         
     edited_df = st.data_editor(st.session_state.manual_df, num_rows="dynamic", use_container_width=True)
@@ -233,11 +248,12 @@ if mode == "📝 Manual Entry (UI Table)":
         if not api_key or not website_url:
             st.error("❌ Please enter API Key and Website URL in sidebar.")
         else:
-            cleaned_df = edited_df.dropna(subset=['Keyword', 'City'])
-            cleaned_df = cleaned_df[cleaned_df['Keyword'].str.strip() != ""]
+            # Dropna sirf Keyword par check karega, City/State par nahi
+            cleaned_df = edited_df.dropna(subset=['Keyword'])
+            cleaned_df = cleaned_df[cleaned_df['Keyword'].astype(str).str.strip() != ""]
             
             if cleaned_df.empty:
-                st.warning("⚠️ Table is empty. Please enter data.")
+                st.warning("⚠️ Table is empty. Please enter keywords.")
             else:
                 df_results = process_clean_dataframe(cleaned_df)
                 st.dataframe(df_results, use_container_width=True)
@@ -259,8 +275,9 @@ elif mode == "📂 Bulk Upload (Excel)":
         df_upload = pd.read_excel(uploaded_file)
         df_upload.columns = [str(c).strip().title() for c in df_upload.columns]
         
-        if not all(col in df_upload.columns for col in ['Keyword', 'City']):
-            st.error("❌ Excel must have columns: Keyword, City")
+        # Sirf 'Keyword' lazmi hai, 'City' optional hai
+        if 'Keyword' not in df_upload.columns:
+            st.error("❌ Excel must have at least 'Keyword' column. (City & State are optional)")
         else:
             if st.button("🚀 Start Bulk Checking"):
                 df_results = process_clean_dataframe(df_upload)
